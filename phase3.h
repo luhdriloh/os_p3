@@ -26,49 +26,23 @@ typedef struct semaphore semaphore;
 typedef struct proc proc;
 typedef struct proc *procPtr;
 
-typedef struct childList childList;
-typedef struct siblingList siblingList;
-typedef struct quitList quitList;
-typedef struct quitSiblingList quitSiblingList;
-
 
 /* struct definitions */
 
-struct childList {
-    procPtr next;
-};
-
-struct siblingList {
-    procPtr next;
-};
-
-struct quitList {
-    procPtr next;
-};
-
-struct quitSiblingList {
-    procPtr next;
-};
-
 struct semaphore {
-    int count;
+    int         count;
 };
 
 struct proc {
     int         pid;
     int         status;
     int         mailBox;
-    int (*func)(char *);
-
-    
-    childList       children;
-    siblingList     siblings;
-    quitList        quits;
-    quitSiblingList quitSiblings;
+    int         (*func)(char *);    
+    procPtr     childList;
+    procPtr     nextSibling;
+    procPtr     quitList;
+    procPtr     nextQuitSibling;
 };
-
-
-
 
 
 #endif /* _PHASE3_H */

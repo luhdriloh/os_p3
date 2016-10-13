@@ -278,7 +278,8 @@ procPtr addToList(procPtr head, procPtr toAdd, int listType) {
         temp = getNext(temp, listType);
     }
 
-    setNext(temp, toAdd, listType); 
+    setNext(temp, toAdd, listType);
+    return head; 
 }
 
 procPtr removeFromList(procPtr head, procPtr toRemove, int listType) {
@@ -305,13 +306,9 @@ procPtr getNext(procPtr node, int listType) {
 
     switch (listType) {
         case CHILD_LIST:
-            return node->childList.next;
-        case SIBLING_LIST:
-            return node->siblingList.next;
+            return node->nextSibling;
         case QUIT_LIST:
-            return node->quitList.next;
-        case QUIT_SIBLING_LIST:
-            return node->quitSiblingList.next;
+            return node->nextQuitSibling;
         default:
             fprintf(stderr, "The horse got you again...\n");
             exit(1);   
@@ -322,16 +319,10 @@ void setNext(procPtr node, procPtr toSet, int listType) {
 
     switch (listType) {
         case CHILD_LIST:
-            node->childList.next = toSet;
-            return;
-        case SIBLING_LIST:
-            node->siblingList.next = toSet;
+            node->nextSibling = toSet;
             return;
         case QUIT_LIST:
-            node->quitList.next = toSet;
-            return;
-        case QUIT_SIBLING_LIST:
-            node->quitSiblingList.next = toSet;
+            node->nextQuitSibling = toSet;
             return;
         default:
             fprintf(stderr, "The horse got you again...\n");
