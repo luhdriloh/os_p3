@@ -5,7 +5,13 @@
 #ifndef _PHASE3_H
 #define _PHASE3_H
 
-#define MAXSEMS         200
+#define MAXSEMS                 200
+
+#define CHILD_LIST              1
+#define SIBLING_LIST            2
+#define QUIT_LIST               3
+#define QUIT_SIBLING_LIST       4
+
 
 
 /* function prototypes */
@@ -20,8 +26,30 @@ typedef struct semaphore semaphore;
 typedef struct proc proc;
 typedef struct proc *procPtr;
 
+typedef struct childList childList;
+typedef struct siblingList siblingList;
+typedef struct quitList quitList;
+typedef struct quitSiblingList quitSiblingList;
+
 
 /* struct definitions */
+
+struct childList {
+    procPtr next;
+};
+
+struct siblingList {
+    procPtr next;
+};
+
+struct quitList {
+    procPtr next;
+};
+
+struct quitSiblingList {
+    procPtr next;
+};
+
 struct semaphore {
     int count;
 };
@@ -32,9 +60,11 @@ struct proc {
     int         mailBox;
     int (*func)(char *);
 
-    /*  */
-    procPtr     children;
-    procPtr     sibling;
+    
+    childList       children;
+    siblingList     siblings;
+    quitList        quits;
+    quitSiblingList quitSiblings;
 };
 
 

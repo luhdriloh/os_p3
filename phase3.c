@@ -266,8 +266,78 @@ procPtr addChild(procPtr head, procPtr toAdd)
 } /* addChild */
 
 
+procPtr addToList(procPtr head, procPtr toAdd, int listType) {
+    
+    if (head == NULL) {
+        return toAdd;
+    }
+    
+    procPtr temp = head;
 
+    while (getNext(head, listType) != NULL) {
+        temp = getNext(temp, listType);
+    }
 
+    setNext(temp, toAdd, listType); 
+}
+
+procPtr removeFromList(procPtr head, procPtr toRemove, int listType) {
+
+    if (head == toRemove) {
+        return getNext(head, listType);   
+    }
+
+    procPtr temp = head;    
+
+    while (getNext(head, listType) != NULL) {
+        if (getNext(temp, listType) == toRemove) {
+            setNext(temp, getNext(getNext(temp, listType), listType));
+            return head;
+        }
+        temp = getNext(temp, listType);
+    }
+    
+    fprintf(stderr, "The node to remove wasnt found.\n");
+    exit(1); 
+} 
+
+procPtr getNext(procPtr node, int listType) {
+
+    switch (listType) {
+        case CHILD_LIST:
+            return node->childList.next;
+        case SIBLING_LIST:
+            return node->siblingList.next;
+        case QUIT_LIST:
+            return node->quitList.next;
+        case QUIT_SIBLING_LIST:
+            return node->quitSiblingList.next;
+        default:
+            fprintf(stderr, "The horse got you again...\n");
+            exit(1);   
+    }
+}
+
+void setNext(procPtr node, procPtr toSet, int listType) {
+
+    switch (listType) {
+        case CHILD_LIST:
+            node->childList.next = toSet;
+            return;
+        case SIBLING_LIST:
+            node->siblingList.next = toSet;
+            return;
+        case QUIT_LIST:
+            node->quitList.next = toSet;
+            return;
+        case QUIT_SIBLING_LIST:
+            node->quitSiblingList.next = toSet;
+            return;
+        default:
+            fprintf(stderr, "The horse got you again...\n");
+            exit(1);   
+    }   
+}
 
 
 
