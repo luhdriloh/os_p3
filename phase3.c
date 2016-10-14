@@ -144,18 +144,20 @@ int spawnReal(char *name, int (*func)(char *), char *arg, int stacksize, int pri
     slot = &ProcTable[pid % MAXPROC];
 
 
-    /* add child process to parent */
+    /* set child and parent nodes */
     parent->children = addChild(parent->children, slot);
+    slot->parent = parent;
 
 
     /* fill out process table */
     slot->pid = pid;
-    slot->func = func;
+    slot->exitStatus = 0;
     slot->children = NULL;
+    slot->func = func;
 
 
     /* unblock spawnLaunch */
-    MboxSend(slot->mailbox, NULL, 0);
+    MboxSend(slot->launchMailbox, NULL, 0);
 
 
     // put into process table
@@ -181,7 +183,7 @@ int spawnLaunch(char *arg)
 
     /* block spawnLaunch until process table filled in */
     slot = &ProcTable[getpid() % MAXPROC];
-    MboxReceive(slot->mailbox, NULL, 0);
+    MboxReceive(slot->launchMailbox, NULL, 0);
 
     /* call function and return value if it is given call terminate() */
     returnVal = slot->func(arg);
@@ -194,7 +196,7 @@ int spawnLaunch(char *arg)
 
 /* ------------------------------------------------------------------------
    Name - wait
-   Purpose - The system call handler for SYS_SPAWN
+   Purpose - The system call handler for SYS_WAIT
    Parameters - A systemArgs pointer
    Returns - n/a
    Side Effects - n/a
@@ -214,8 +216,9 @@ void wait(systemArgs *args) {
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
-void wait(systemArgs *args) {
-
+void waitReal() {
+    // check your quit list
+    // if nobody has quit block using a (mailbox)
 }
 
 
@@ -230,9 +233,28 @@ void wait(systemArgs *args) {
 
 void terminate(systemArgs *args)
 {
-    int status;
+    int exitStatus;
 
-    status = *((int *)(args->args1));
+    exitStatus = *((int *)(args->args1));
+    terminateReal(exitStatus);
+}
+
+
+
+/* ------------------------------------------------------------------------
+   Name - terminateReal
+   Purpose - The system call handler for SYS_TERMINATE
+   Parameters - A systemArgs pointer
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void terminateReal(int exitStatus) {
+    // put yourself on your parents quit list
+    // take yourself out of the child list
+    
+    // do a conditional send on the waitmailbox to unblock
+    //     parent if it is blocked
 }
 
 
@@ -245,7 +267,7 @@ void terminate(systemArgs *args)
    Side Effects - Halts
    ----------------------------------------------------------------------- */
 
-void nullsys3(systemArgs *args)
+void nullsys3(int status)
 {
 
 } /* nullsys3 */
