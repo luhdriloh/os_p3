@@ -3,6 +3,7 @@
 #include <phase2.h>
 #include <phase3.h>
 #include <usyscall.h>
+#include <stdio.h>
 #include <sems.h>
 
 
@@ -53,7 +54,7 @@ int start2(char *arg)
 
     /* give each process tableslot its own personal mailbox */
     for (int i = 0; i < MAXPROC; i++) {
-        ProcTable[i].mailBox = MboxCreate(0,0);
+        ProcTable[i].mailbox = MboxCreate(0,0);
     }
 
 
@@ -102,8 +103,8 @@ void spawn(systemArgs *args)
     }
 
     if (errors) {
-        *(args->arg1) = (void *) -1;
-        *(args->arg4) = (void *) -1;
+        args->arg1 = (void *) -1;
+        args->arg4 = (void *) -1;
         return;
     }
 
@@ -112,12 +113,12 @@ void spawn(systemArgs *args)
     spawnSuccess = spawnReal(name, func, argument, stacksize, priority);
 
     if (spawnSuccess == -1) {
-        *(args->arg1) = (void *) -1;
-        *(args->arg4) = (void *) -1;
+        args->arg1 = (void *) -1;
+        args->arg4 = (void *) -1;
     }
 
-    *(args->arg4) = (void *) -1;
-    *(args->arg1) = (void *) spawnSuccess;
+    args->arg1 = (void *) spawnSuccess;
+    args->arg4 = (void *) 0;
 
     // terminate
 } /* spawn */
@@ -145,19 +146,19 @@ int spawnReal(char *name, int (*func)(char *), char *arg, int stacksize, int pri
 
 
     /* set child and parent nodes */
-    parent->children = addChild(parent->children, slot);
+    parent->childList = addToList(parent->childList, slot, CHILD_LIST);
     slot->parent = parent;
 
 
     /* fill out process table */
     slot->pid = pid;
     slot->exitStatus = 0;
-    slot->children = NULL;
+    slot->childList = NULL;
     slot->func = func;
 
 
     /* unblock spawnLaunch */
-    MboxSend(slot->launchMailbox, NULL, 0);
+    MboxSend(slot->mailbox, NULL, 0);
 
 
     // put into process table
@@ -183,9 +184,10 @@ int spawnLaunch(char *arg)
 
     /* block spawnLaunch until process table filled in */
     slot = &ProcTable[getpid() % MAXPROC];
-    MboxReceive(slot->launchMailbox, NULL, 0);
+    MboxReceive(slot->mailbox, NULL, 0);
 
     /* call function and return value if it is given call terminate() */
+    switchToUserMode();
     returnVal = slot->func(arg);
 
     // call terminate
@@ -202,8 +204,21 @@ int spawnLaunch(char *arg)
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
-void wait(systemArgs *args) {
+void wait(systemArgs *args)
+{
+    int pid, processIndex, terminationCode;
+    procPtr currentProcess;
 
+    /* retrieve the pid of the process that needs to wait */
+    pid = getpid();
+    processIndex = pid % MAXPROC;
+    currentProcess = &ProcTable[processIndex];
+
+    /* call waitReal and retrieve exit code */
+    terminationCode = waitReal(currentProcess);
+
+    args->arg1 = (void *) pid;
+    args->arg4 = (void *) terminationCode;
 }
 
 
@@ -216,9 +231,22 @@ void wait(systemArgs *args) {
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
-void waitReal() {
-    // check your quit list
-    // if nobody has quit block using a (mailbox)
+int waitReal(procPtr currentProcess)
+{
+    procPtr quitChild;
+    int exitStatus;
+
+    /* if no one in quitlist block*/
+    if (currentProcess->quitList == NULL) {
+        MboxReceive(currentProcess->mailbox, NULL);
+    }
+
+    /* retrieve a child who has quit */
+    quitChild = currentProcess->quitList;
+    exitStatus = quitChild->exitStatus;
+    procPtr->quitlist = removeFromList(procPtr->quitlist, quitChild, QUIT_LIST);
+
+    return exitStatus;
 }
 
 
@@ -234,9 +262,13 @@ void waitReal() {
 void terminate(systemArgs *args)
 {
     int exitStatus;
+    procPtr currentProcess;
 
-    exitStatus = *((int *)(args->args1));
-    terminateReal(exitStatus);
+    exitStatus = *((int *)(args->arg1));
+
+    currentProcess = &ProcTable[getpid() % MAXPROC];
+
+    terminateReal(exitStatus, currentProcess);
 }
 
 
@@ -249,12 +281,25 @@ void terminate(systemArgs *args)
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
-void terminateReal(int exitStatus) {
-    // put yourself on your parents quit list
-    // take yourself out of the child list
-    
-    // do a conditional send on the waitmailbox to unblock
-    //     parent if it is blocked
+void terminateReal(int exitStatus, procPtr currentProcess)
+{
+    procPtr childToTerminate;
+
+    childToTerminate = NULL;
+
+    /* check if process has children */
+    if (currentProcess->childList != NULL) {
+        childToTerminate = currentProcess->childList;
+
+        while (childToTerminate != NULL) {
+            zap(childToTerminate->pid);
+            childToTerminate = childToTerminate->nextSibling;
+        }
+    }
+
+    /* set exit status and conditionally send to parent if it is waiting */
+    currentProcess->exitStatus = exitStatus;
+    MboxCondSend(currentProcess->parent->mailbox, NULL, 0);
 }
 
 
@@ -274,22 +319,10 @@ void nullsys3(int status)
 
 
 
-/* ------------------------------------------------------------------------
-   Name - addChild
-   Purpose - Temporary function to call for the syscall handler
-   Parameters - n/a
-   Returns - n/a
-   Side Effects - Halts
-   ----------------------------------------------------------------------- */
+procPtr addToList(procPtr head, procPtr toAdd, int listType)
+{  
+    setNext(toAdd, NULL, listType);
 
-procPtr addChild(procPtr head, procPtr toAdd)
-{
-
-} /* addChild */
-
-
-procPtr addToList(procPtr head, procPtr toAdd, int listType) {
-    
     if (head == NULL) {
         return toAdd;
     }
@@ -304,8 +337,9 @@ procPtr addToList(procPtr head, procPtr toAdd, int listType) {
     return head; 
 }
 
-procPtr removeFromList(procPtr head, procPtr toRemove, int listType) {
 
+procPtr removeFromList(procPtr head, procPtr toRemove, int listType)
+{
     if (head == toRemove) {
         return getNext(head, listType);   
     }
@@ -314,30 +348,31 @@ procPtr removeFromList(procPtr head, procPtr toRemove, int listType) {
 
     while (getNext(head, listType) != NULL) {
         if (getNext(temp, listType) == toRemove) {
-            setNext(temp, getNext(getNext(temp, listType), listType));
+            setNext(temp, getNext(getNext(temp, listType), listType), listType);
             return head;
         }
         temp = getNext(temp, listType);
     }
     
     fprintf(stderr, "The node to remove wasnt found.\n");
-    exit(1); 
 } 
 
-procPtr getNext(procPtr node, int listType) {
 
+procPtr getNext(procPtr node, int listType)
+{
     switch (listType) {
         case CHILD_LIST:
             return node->nextSibling;
         case QUIT_LIST:
             return node->nextQuitSibling;
         default:
-            fprintf(stderr, "The horse got you again...\n");
-            exit(1);   
+            fprintf(stderr, "The horse got you again...\n"); 
     }
 }
 
-void setNext(procPtr node, procPtr toSet, int listType) {
+
+void setNext(procPtr node, procPtr toSet, int listType)
+{
 
     switch (listType) {
         case CHILD_LIST:
@@ -347,9 +382,18 @@ void setNext(procPtr node, procPtr toSet, int listType) {
             node->nextQuitSibling = toSet;
             return;
         default:
-            fprintf(stderr, "The horse got you again...\n");
-            exit(1);   
+            fprintf(stderr, "The horse got you again...\n"); 
     }   
+}
+
+
+void switchToUserMode()
+{
+    union psrValues currentPsrStatus;
+
+    currentPsrStatus.integerPart = USLOSS_PsrGet();
+    currentPsrStatus.bits.curMode = 0;
+    USLOSS_PsrSet(currentPsrStatus.integerPart);
 }
 
 
