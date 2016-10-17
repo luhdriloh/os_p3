@@ -9,10 +9,17 @@
 
 #define CHILD_LIST              1
 #define QUIT_LIST               2
+#define SEM_BLOCK_LIST          3
+
+
+/* status' for semaphores */
+#define FREE    0
+#define IN_USE  1
 
 
 /* typedef */
 typedef struct semaphore semaphore;
+typedef struct semaphore *semPtr;
 typedef struct proc proc;
 typedef struct proc *procPtr;
 
@@ -21,6 +28,10 @@ typedef struct proc *procPtr;
 
 struct semaphore {
     int         count;
+    int         mutex;
+    int         status;
+
+    procPtr     blockedProcs;
 };
 
 struct proc {
@@ -35,6 +46,7 @@ struct proc {
     procPtr     nextSibling;
     procPtr     quitList;
     procPtr     nextQuitSibling;
+    procPtr     nextSemBlockedSibling;
 };
 
 struct psrBits {
@@ -57,10 +69,33 @@ extern int     spawnReal(char *name, int (*func)(char *), char *arg, int stacksi
 extern int     spawnLaunch(char *arg);
 
 extern void    wait(systemArgs *args);
-extern int     waitReal(procPtr slot);
+extern int     waitReal(int *status);
 
 extern void    terminate(systemArgs *args);
-extern void    terminateReal(int exitStatus, procPtr currentProcess);
+extern void    terminateReal(int exitStatus);
+
+extern void    semCreate(systemArgs *args);
+extern int     semCreateReal(int semValue);
+
+extern void    semP(systemArgs *args);
+extern int     semPReal(int semHandle);
+
+extern void    semV(systemArgs *args);
+extern int     semVReal(int semHandle);
+
+extern void    semFree(systemArgs *args);
+extern int     semFreeReal(int semHandle);
+
+extern void    getPID(systemArgs *args);
+extern int     getPIDReal();
+
+extern void    getTimeofDay(systemArgs *args);
+extern int     getTimeofDayReal();
+
+extern void    cpuTime(systemArgs *args);
+extern int     cputTimeReal();
+
+extern void nullsys3(int status);
 
 extern procPtr addToList(procPtr head, procPtr toAdd, int listType);
 extern procPtr removeFromList(procPtr head, procPtr toRemove, int listType);

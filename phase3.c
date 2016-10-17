@@ -4,11 +4,13 @@
 #include <phase3.h>
 #include <usyscall.h>
 #include <stdio.h>
-#include <sems.h>
 
 
-proc ProcTable[MAXPROC];
+proc      ProcTable[MAXPROC];
+semaphore SemTable[MAXSEMS];
+int       semCreateMutex;
 
+extern int start3 (char *);
 
 int start2(char *arg)
 {
@@ -52,11 +54,33 @@ int start2(char *arg)
      * return to the user code that called Spawn.
      */
 
+    for (int i = 0; i < USLOSS_MAX_SYSCALLS; i++) {
+        systemCallVec[i] = nullsys3;
+    }
+
+    systemCallVec[SYS_SPAWN] = spawn;
+    systemCallVec[SYS_TERMINATE] = terminate;
+    systemCallVec[SYS_WAIT] = wait;
+    systemCallVec[SYS_SEMCREATE] = semCreate;
+    systemCallVec[SYS_SEMP] = semP;
+    systemCallVec[SYS_SEMV] = semV;
+    systemCallVec[SYS_SEMFREE] = semFree;
+    systemCallVec[SYS_GETPID] = getPID;
+    systemCallVec[SYS_GETTIMEOFDAY] = getTimeofDay;
+    systemCallVec[SYS_CPUTIME] = cpuTime;
+
+    semCreateMutex = MboxCreate(1,0);
+
+    /* fill out semaphore table */
+    for (int i = 0; i < MAXSEMS; i++) {
+        SemTable[i].mutex = MboxCreate(1, 0);
+    }
+
+
     /* give each process tableslot its own personal mailbox */
     for (int i = 0; i < MAXPROC; i++) {
         ProcTable[i].mailbox = MboxCreate(0,0);
     }
-
 
     pid = spawnReal("start3", start3, NULL, USLOSS_MIN_STACK, 3);
 
@@ -65,7 +89,6 @@ int start2(char *arg)
      * in kernel (not user) mode.ww
      */
     pid = waitReal(&status);
-
 } /* start2 */
 
 
@@ -85,20 +108,14 @@ void spawn(systemArgs *args)
     int (*func)(char *);
     int stacksize, priority, errors, spawnSuccess;
 
-    name = ((char *)args->arg5);
-    argument = ((char *)args->arg2);
-    func = (int(*)(char *))(args->arg1);
-    stacksize = *((int *)args->arg3);
-    priority = *((int *)args->arg4);
     errors = 0;
 
-
     /* check stacksize, name, func and priority */
-    if (stacksize < USLOSS_MIN_STACK) {
+    if (args->arg3 < USLOSS_MIN_STACK) {
         errors = 1;
     }
 
-    if (name == NULL || func == NULL || priority < 1 || priority > 6) {
+    if (args->arg5 == NULL || args->arg1 == NULL || args->arg4 == NULL) {
         errors = 1;
     }
 
@@ -108,7 +125,18 @@ void spawn(systemArgs *args)
         return;
     }
 
-    
+    name = args->arg5;
+    argument = args->arg2;
+    func = (int(*)(char *))(args->arg1);
+    stacksize = (int) args->arg3;
+    priority = (int) args->arg4;
+
+    if (priority < 1 || priority > 6) {
+        args->arg1 = (void *) -1;
+        args->arg4 = (void *) -1;
+        return;
+    }
+
     /* call spawn to create the user proces */
     spawnSuccess = spawnReal(name, func, argument, stacksize, priority);
 
@@ -119,8 +147,6 @@ void spawn(systemArgs *args)
 
     args->arg1 = (void *) spawnSuccess;
     args->arg4 = (void *) 0;
-
-    // terminate
 } /* spawn */
 
 
@@ -136,34 +162,37 @@ void spawn(systemArgs *args)
 int spawnReal(char *name, int (*func)(char *), char *arg, int stacksize, int priority)
 {
     int pid;
-    procPtr slot, parent;
+    procPtr spawnedSlot, parent;
 
-
-    /* intialize values */
-    parent = &ProcTable[getpid() % MAXPROC];
+    /* initialize values */
     pid = fork1(name, spawnLaunch, arg, stacksize, priority);
-    slot = &ProcTable[pid % MAXPROC];
+
+    if (pid == -1) {
+        return -1;
+    }
+
+    spawnedSlot = &ProcTable[pid % MAXPROC];
 
 
     /* set child and parent nodes */
-    parent->childList = addToList(parent->childList, slot, CHILD_LIST);
-    slot->parent = parent;
+    parent = &ProcTable[getpid() % MAXPROC];
+
+    parent->childList = addToList(parent->childList, spawnedSlot, CHILD_LIST);
+    spawnedSlot->parent = parent;
 
 
     /* fill out process table */
-    slot->pid = pid;
-    slot->exitStatus = 0;
-    slot->childList = NULL;
-    slot->func = func;
+    spawnedSlot->pid = pid;
+    spawnedSlot->exitStatus = 0;
+    spawnedSlot->childList = NULL;
+    spawnedSlot->func = func;
 
 
     /* unblock spawnLaunch */
-    MboxSend(slot->mailbox, NULL, 0);
-
+    MboxCondSend(spawnedSlot->mailbox, NULL, 0);
 
     // put into process table
     return pid;
-
 } /* spawnReal */
 
 
@@ -181,17 +210,23 @@ int spawnLaunch(char *arg)
     int returnVal;
     procPtr slot;
 
-
     /* block spawnLaunch until process table filled in */
     slot = &ProcTable[getpid() % MAXPROC];
-    MboxReceive(slot->mailbox, NULL, 0);
+
+    if (slot->pid != getpid()) {
+        MboxReceive(slot->mailbox, NULL, 0);
+    }
+
+    if (isZapped()) {
+        terminateReal(-1);
+    }
 
     /* call function and return value if it is given call terminate() */
     switchToUserMode();
     returnVal = slot->func(arg);
 
-    // call terminate
-    return returnVal;
+    /* call terminate */
+    Terminate(returnVal);
 }
 
 
@@ -206,19 +241,13 @@ int spawnLaunch(char *arg)
 
 void wait(systemArgs *args)
 {
-    int pid, processIndex, terminationCode;
-    procPtr currentProcess;
-
-    /* retrieve the pid of the process that needs to wait */
-    pid = getpid();
-    processIndex = pid % MAXPROC;
-    currentProcess = &ProcTable[processIndex];
+    int terminationCode, pid;
 
     /* call waitReal and retrieve exit code */
-    terminationCode = waitReal(currentProcess);
+    pid = waitReal(&terminationCode);
 
-    args->arg1 = (void *) pid;
-    args->arg4 = (void *) terminationCode;
+    args->arg1 = pid;
+    args->arg2 = terminationCode;
 }
 
 
@@ -231,22 +260,25 @@ void wait(systemArgs *args)
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
-int waitReal(procPtr currentProcess)
+int waitReal(int *terminationCode)
 {
-    procPtr quitChild;
+    procPtr quitChild, currentProcess;
     int exitStatus;
 
-    /* if no one in quitlist block*/
-    if (currentProcess->quitList == NULL) {
-        MboxReceive(currentProcess->mailbox, NULL);
-    }
+    /* get current process and check if no one is in quitlist block */
+    currentProcess = &ProcTable[getpid() % MAXPROC];
+    exitStatus = 0;
+
+    join(&exitStatus);
 
     /* retrieve a child who has quit */
     quitChild = currentProcess->quitList;
     exitStatus = quitChild->exitStatus;
-    procPtr->quitlist = removeFromList(procPtr->quitlist, quitChild, QUIT_LIST);
+    currentProcess->quitList = removeFromList(currentProcess->quitList, quitChild, QUIT_LIST);
 
-    return exitStatus;
+    /* put terminationCode in int pointer given and return pid of quit child */
+    *terminationCode = exitStatus;
+    return quitChild->pid;
 }
 
 
@@ -264,11 +296,11 @@ void terminate(systemArgs *args)
     int exitStatus;
     procPtr currentProcess;
 
-    exitStatus = *((int *)(args->arg1));
+    exitStatus = (int) args->arg1;
 
+    /* get current process and call terminate real */
     currentProcess = &ProcTable[getpid() % MAXPROC];
-
-    terminateReal(exitStatus, currentProcess);
+    terminateReal(exitStatus);
 }
 
 
@@ -281,27 +313,402 @@ void terminate(systemArgs *args)
    Side Effects - n/a
    ----------------------------------------------------------------------- */
 
-void terminateReal(int exitStatus, procPtr currentProcess)
+void terminateReal(int exitStatus)
 {
-    procPtr childToTerminate;
+    procPtr childToTerminate, parent, currentProcess;
 
+    currentProcess = &ProcTable[getpid() % MAXPROC];
+    parent = currentProcess->parent;
     childToTerminate = NULL;
 
-    /* check if process has children */
+
     if (currentProcess->childList != NULL) {
         childToTerminate = currentProcess->childList;
 
         while (childToTerminate != NULL) {
             zap(childToTerminate->pid);
-            childToTerminate = childToTerminate->nextSibling;
+            childToTerminate = currentProcess->childList;
         }
     }
 
-    /* set exit status and conditionally send to parent if it is waiting */
     currentProcess->exitStatus = exitStatus;
-    MboxCondSend(currentProcess->parent->mailbox, NULL, 0);
+    parent->childList = removeFromList(parent->childList, currentProcess, CHILD_LIST);
+    parent->quitList = addToList(parent->quitList, currentProcess, QUIT_LIST);
+
+    quit(0);
 }
 
+
+
+/* ------------------------------------------------------------------------
+   Name - semCreate
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void semCreate(systemArgs *args)
+{
+    int initialValue, slot;
+
+    initialValue = args->arg1;
+
+    /* check that valid start count is given */
+    if (initialValue < 0) {
+        args->arg1 = -1;
+        args->arg4 = -1;
+        return;
+    }
+
+    slot = semCreateReal(initialValue);
+   
+    /* check if semaphore table is full */
+    if (slot == -1) {
+        args->arg1 = -1;
+        args->arg4 = -1;
+        return;
+    }
+
+    args->arg1 = slot;
+    args->arg4 = 0;
+
+    if (isZapped()) {
+        Terminate(0);
+    }
+
+    switchToUserMode();
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semCreateReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+int semCreateReal(int semValue)
+{
+    int slot;
+
+    slot = -1;
+
+    /* mutual exclusion */
+    MboxSend(semCreateMutex, NULL, 0);
+    
+    /* find an empty semaphore slot */
+    for (int i = 0; i < MAXSEMS; i++) {
+
+        if (SemTable[i].status == FREE) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot != -1) {
+        SemTable[slot].status = IN_USE;
+        SemTable[slot].count = semValue;
+        SemTable[slot].blockedProcs = NULL;
+    }
+
+    /* release any other blocked proesses */
+    MboxReceive(semCreateMutex, NULL, 0);
+
+    return slot;
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semP
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void semP(systemArgs *args)
+{
+    int semHandle, semVal;
+
+    semHandle = args->arg1;
+
+    if (semHandle < 0 || semHandle > MAXSEMS) {
+        args->arg4 = -1;
+    }
+    else {
+        semVal = semPReal(semHandle);
+        args->arg4 = semVal;
+    }
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semPReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+int semPReal(int semHandle)
+{
+    semPtr semToChange;
+
+    semToChange = &SemTable[semHandle];
+
+    /* check if we have a valid semaphore handle */
+    if (semToChange->status == FREE) {
+        return -1;
+    }
+
+    /* mutex */
+    MboxSend(semToChange->mutex, NULL, 0);
+
+    if (semToChange->count > 0) {
+        (semToChange->count)--;
+        
+        /* mutex release */
+        MboxReceive(semToChange->mutex, NULL, 0);
+
+    }
+    else {
+        procPtr currentProcess = &ProcTable[getpid() % MAXPROC];
+        semToChange->blockedProcs = addToList(semToChange->blockedProcs,
+                                              currentProcess, SEM_BLOCK_LIST);
+
+        /* mutex release */
+        MboxReceive(semToChange->mutex, NULL, 0);
+        MboxReceive(currentProcess->mailbox, NULL, 0);
+
+        if (semToChange->status == FREE) {
+            terminateReal(1);
+        }
+
+        (semToChange->count)--;
+    }
+
+    return 0;
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semV
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void semV(systemArgs *args)
+{
+    int semHandle, semVal;
+
+    semHandle = args->arg1;
+
+    if (semHandle < 0 || semHandle > MAXSEMS) {
+        args->arg4 = -1;
+    }
+    else {
+        semVal = semVReal(semHandle);
+        args->arg4 = semVal;
+    }
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semVReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+int semVReal(int semHandle)
+{
+    semPtr semToChange;
+
+    semToChange = &SemTable[semHandle];
+
+    /* check if we have a valid semaphore handle */
+    if (semToChange->status == FREE) {
+        return -1;
+    }
+
+    /* mutex */
+    MboxSend(semToChange->mutex, NULL, 0);
+    (semToChange->count)++;
+
+    if (semToChange->blockedProcs != NULL) {
+        procPtr procToUnblock = semToChange->blockedProcs;
+        semToChange->blockedProcs = removeFromList(semToChange->blockedProcs, procToUnblock, SEM_BLOCK_LIST);
+        MboxSend(procToUnblock->mailbox, NULL, 0);
+    }
+
+    MboxReceive(semToChange->mutex, NULL, 0);
+
+    return 0;
+}
+
+
+
+/* ------------------------------------------------------------------------
+   Name - semFree
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void semFree(systemArgs *args)
+{
+    int semHandle, semVal;
+
+    semHandle = args->arg1;
+
+    if (semHandle < 0 || semHandle > MAXSEMS) {
+        args->arg4 = -1;
+    }
+    else {
+        semVal = semFreeReal(semHandle);
+        args->arg4 = semVal;
+    }
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - semFreeReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+int semFreeReal(int semHandle)
+{
+    semPtr semToFree;
+    procPtr procToFree;
+    int returnVal;
+
+    semToFree = &SemTable[semHandle];
+    returnVal = 0;
+
+    /* check that we have a valid semaphore */
+    if (semToFree->blockedProcs != NULL) {
+        returnVal = 1;
+    }
+
+    semToFree->status = FREE;
+    procToFree = semToFree->blockedProcs;
+
+    while (procToFree != NULL) {
+        MboxSend(procToFree->mailbox, NULL, 0);
+        procToFree = procToFree->nextSemBlockedSibling;
+    }
+
+    semToFree->blockedProcs = NULL;
+    return returnVal;
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - getPID
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void getPID(systemArgs *args)
+{
+    int pid;
+
+    pid = getPIDReal();
+
+    args->arg1 = pid;
+}
+
+
+
+/* ------------------------------------------------------------------------
+   Name - getPIDReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+int getPIDReal()
+{
+    return getpid();
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - getTimeofDay
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void getTimeofDay(systemArgs *args)
+{
+    int time;
+
+    time = getTimeofDayReal();
+
+    args->arg1 = time;
+}
+
+
+
+/* ------------------------------------------------------------------------
+   Name - getTimeofDayReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+int getTimeofDayReal()
+{
+    return USLOSS_Clock();
+}
+
+
+/* ------------------------------------------------------------------------
+   Name - cpuTime
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+void cpuTime(systemArgs *args)
+{
+    int time;
+
+    time = getTimeofDayReal();
+
+    args->arg1 = time;
+}
+
+
+
+/* ------------------------------------------------------------------------
+   Name - cputTimeReal
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
+int cpuTimeReal()
+{
+    return readtime();
+}
 
 
 /* ------------------------------------------------------------------------
@@ -329,7 +736,7 @@ procPtr addToList(procPtr head, procPtr toAdd, int listType)
     
     procPtr temp = head;
 
-    while (getNext(head, listType) != NULL) {
+    while (getNext(temp, listType) != NULL) {
         temp = getNext(temp, listType);
     }
 
@@ -340,13 +747,14 @@ procPtr addToList(procPtr head, procPtr toAdd, int listType)
 
 procPtr removeFromList(procPtr head, procPtr toRemove, int listType)
 {
+
     if (head == toRemove) {
         return getNext(head, listType);   
     }
 
     procPtr temp = head;    
 
-    while (getNext(head, listType) != NULL) {
+    while (getNext(temp, listType) != NULL) {
         if (getNext(temp, listType) == toRemove) {
             setNext(temp, getNext(getNext(temp, listType), listType), listType);
             return head;
@@ -354,7 +762,8 @@ procPtr removeFromList(procPtr head, procPtr toRemove, int listType)
         temp = getNext(temp, listType);
     }
     
-    fprintf(stderr, "The node to remove wasnt found.\n");
+    fprintf(stderr, "removeFromList(): The node to remove wasnt found.\nlist type: %d\n\n", listType);
+    return NULL;
 } 
 
 
@@ -365,9 +774,12 @@ procPtr getNext(procPtr node, int listType)
             return node->nextSibling;
         case QUIT_LIST:
             return node->nextQuitSibling;
+        case SEM_BLOCK_LIST:
+            return node->nextSemBlockedSibling;
         default:
-            fprintf(stderr, "The horse got you again...\n"); 
+            fprintf(stderr, "getNext(): The horse got you again...\n"); 
     }
+    return NULL;
 }
 
 
@@ -381,8 +793,11 @@ void setNext(procPtr node, procPtr toSet, int listType)
         case QUIT_LIST:
             node->nextQuitSibling = toSet;
             return;
+        case SEM_BLOCK_LIST:
+            node->nextSemBlockedSibling = toSet;
+            return;
         default:
-            fprintf(stderr, "The horse got you again...\n"); 
+            fprintf(stderr, "setNext(): The horse got you again...\n"); 
     }   
 }
 
@@ -395,10 +810,6 @@ void switchToUserMode()
     currentPsrStatus.bits.curMode = 0;
     USLOSS_PsrSet(currentPsrStatus.integerPart);
 }
-
-
-
-
 
 
 
