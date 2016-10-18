@@ -125,6 +125,7 @@ void spawn(systemArgs *args)
         return;
     }
 
+    /* set values of systemArgs struct */
     name = args->arg5;
     argument = args->arg2;
     func = (int(*)(char *))(args->arg1);
@@ -147,6 +148,7 @@ void spawn(systemArgs *args)
 
     args->arg1 = (void *) spawnSuccess;
     args->arg4 = (void *) 0;
+    switchToUserMode();
 } /* spawn */
 
 
@@ -227,6 +229,8 @@ int spawnLaunch(char *arg)
 
     /* call terminate */
     Terminate(returnVal);
+
+    return 0;
 }
 
 
@@ -248,6 +252,7 @@ void wait(systemArgs *args)
 
     args->arg1 = pid;
     args->arg2 = terminationCode;
+    switchToUserMode();
 }
 
 
@@ -269,6 +274,7 @@ int waitReal(int *terminationCode)
     currentProcess = &ProcTable[getpid() % MAXPROC];
     exitStatus = 0;
 
+    /* call join to let children finish if needed */
     join(&exitStatus);
 
     /* retrieve a child who has quit */
@@ -301,6 +307,7 @@ void terminate(systemArgs *args)
     /* get current process and call terminate real */
     currentProcess = &ProcTable[getpid() % MAXPROC];
     terminateReal(exitStatus);
+    switchToUserMode();
 }
 
 
@@ -317,11 +324,12 @@ void terminateReal(int exitStatus)
 {
     procPtr childToTerminate, parent, currentProcess;
 
+    /* get pointer to current process and get parent */
     currentProcess = &ProcTable[getpid() % MAXPROC];
     parent = currentProcess->parent;
     childToTerminate = NULL;
 
-
+    /* zap any children that exist in the child list */
     if (currentProcess->childList != NULL) {
         childToTerminate = currentProcess->childList;
 
@@ -331,11 +339,13 @@ void terminateReal(int exitStatus)
         }
     }
 
+    /* take yourself off parents childlist and into their quitlist */
     currentProcess->exitStatus = exitStatus;
     parent->childList = removeFromList(parent->childList, currentProcess, CHILD_LIST);
     parent->quitList = addToList(parent->quitList, currentProcess, QUIT_LIST);
 
-    quit(0);
+    /* call quit to terminate process */
+    quit(exitStatus);
 }
 
 
@@ -373,6 +383,7 @@ void semCreate(systemArgs *args)
     args->arg1 = slot;
     args->arg4 = 0;
 
+    /* terminate process if it is zapped */
     if (isZapped()) {
         Terminate(0);
     }
@@ -395,7 +406,7 @@ int semCreateReal(int semValue)
 
     slot = -1;
 
-    /* mutual exclusion */
+    /* mutual */
     MboxSend(semCreateMutex, NULL, 0);
     
     /* find an empty semaphore slot */
@@ -407,13 +418,14 @@ int semCreateReal(int semValue)
         }
     }
 
+    /* if we have a valid slot, then set its values */
     if (slot != -1) {
         SemTable[slot].status = IN_USE;
         SemTable[slot].count = semValue;
         SemTable[slot].blockedProcs = NULL;
     }
 
-    /* release any other blocked proesses */
+    /* mutex release */
     MboxReceive(semCreateMutex, NULL, 0);
 
     return slot;
@@ -434,6 +446,7 @@ void semP(systemArgs *args)
 
     semHandle = args->arg1;
 
+    /* check for valid semaphore handle else call semPReal */
     if (semHandle < 0 || semHandle > MAXSEMS) {
         args->arg4 = -1;
     }
@@ -441,6 +454,8 @@ void semP(systemArgs *args)
         semVal = semPReal(semHandle);
         args->arg4 = semVal;
     }
+ 
+    switchToUserMode();
 }
 
 
@@ -474,14 +489,18 @@ int semPReal(int semHandle)
 
     }
     else {
+        /* get current process add it to semaphore block list and block it */
         procPtr currentProcess = &ProcTable[getpid() % MAXPROC];
         semToChange->blockedProcs = addToList(semToChange->blockedProcs,
                                               currentProcess, SEM_BLOCK_LIST);
 
         /* mutex release */
         MboxReceive(semToChange->mutex, NULL, 0);
+
+        /* block yourself until a V operation is done */
         MboxReceive(currentProcess->mailbox, NULL, 0);
 
+        /* if semaphore is no longer active terminate self */
         if (semToChange->status == FREE) {
             terminateReal(1);
         }
@@ -507,6 +526,7 @@ void semV(systemArgs *args)
 
     semHandle = args->arg1;
 
+    /* check if we have a valid semaphore handle else call semVReal */
     if (semHandle < 0 || semHandle > MAXSEMS) {
         args->arg4 = -1;
     }
@@ -514,6 +534,8 @@ void semV(systemArgs *args)
         semVal = semVReal(semHandle);
         args->arg4 = semVal;
     }
+    
+    switchToUserMode();
 }
 
 
@@ -531,21 +553,23 @@ int semVReal(int semHandle)
 
     semToChange = &SemTable[semHandle];
 
-    /* check if we have a valid semaphore handle */
+    /* check if we have a valid semaphore slot */
     if (semToChange->status == FREE) {
         return -1;
     }
 
-    /* mutex */
+    /* mutex and increment count */
     MboxSend(semToChange->mutex, NULL, 0);
     (semToChange->count)++;
 
+    /* release first blocked process from blockedProcs if it exists */
     if (semToChange->blockedProcs != NULL) {
         procPtr procToUnblock = semToChange->blockedProcs;
         semToChange->blockedProcs = removeFromList(semToChange->blockedProcs, procToUnblock, SEM_BLOCK_LIST);
         MboxSend(procToUnblock->mailbox, NULL, 0);
     }
 
+    /* release mutex */
     MboxReceive(semToChange->mutex, NULL, 0);
 
     return 0;
@@ -567,6 +591,7 @@ void semFree(systemArgs *args)
 
     semHandle = args->arg1;
 
+    /* check that we have a valid handle else call semFreeReal */
     if (semHandle < 0 || semHandle > MAXSEMS) {
         args->arg4 = -1;
     }
@@ -574,6 +599,8 @@ void semFree(systemArgs *args)
         semVal = semFreeReal(semHandle);
         args->arg4 = semVal;
     }
+
+    switchToUserMode();
 }
 
 
@@ -594,11 +621,12 @@ int semFreeReal(int semHandle)
     semToFree = &SemTable[semHandle];
     returnVal = 0;
 
-    /* check that we have a valid semaphore */
+    /* check if our semaphor is blocking process */
     if (semToFree->blockedProcs != NULL) {
         returnVal = 1;
     }
 
+    /* set status of semaphore and free any blocked processes */
     semToFree->status = FREE;
     procToFree = semToFree->blockedProcs;
 
@@ -607,6 +635,7 @@ int semFreeReal(int semHandle)
         procToFree = procToFree->nextSemBlockedSibling;
     }
 
+    /* set pointer blockedProcs to null and return */
     semToFree->blockedProcs = NULL;
     return returnVal;
 }
@@ -625,8 +654,9 @@ void getPID(systemArgs *args)
     int pid;
 
     pid = getPIDReal();
-
     args->arg1 = pid;
+
+    switchToUserMode();
 }
 
 
@@ -658,9 +688,11 @@ void getTimeofDay(systemArgs *args)
     int time;
 
     time = getTimeofDayReal();
-
     args->arg1 = time;
+
+    switchToUserMode();
 }
+
 
 
 
@@ -691,8 +723,9 @@ void cpuTime(systemArgs *args)
     int time;
 
     time = getTimeofDayReal();
-
     args->arg1 = time;
+
+    switchToUserMode();
 }
 
 
@@ -721,10 +754,18 @@ int cpuTimeReal()
 
 void nullsys3(int status)
 {
-
+    Terminate(1);
 } /* nullsys3 */
 
 
+
+/* ------------------------------------------------------------------------
+   Name - addToList
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 procPtr addToList(procPtr head, procPtr toAdd, int listType)
 {  
@@ -744,6 +785,15 @@ procPtr addToList(procPtr head, procPtr toAdd, int listType)
     return head; 
 }
 
+
+
+/* ------------------------------------------------------------------------
+   Name - removeFromList
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 procPtr removeFromList(procPtr head, procPtr toRemove, int listType)
 {
@@ -767,6 +817,16 @@ procPtr removeFromList(procPtr head, procPtr toRemove, int listType)
 } 
 
 
+
+
+/* ------------------------------------------------------------------------
+   Name - getNext
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
+
 procPtr getNext(procPtr node, int listType)
 {
     switch (listType) {
@@ -782,6 +842,16 @@ procPtr getNext(procPtr node, int listType)
     return NULL;
 }
 
+
+
+
+/* ------------------------------------------------------------------------
+   Name - setNext
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 void setNext(procPtr node, procPtr toSet, int listType)
 {
@@ -801,6 +871,15 @@ void setNext(procPtr node, procPtr toSet, int listType)
     }   
 }
 
+
+
+/* ------------------------------------------------------------------------
+   Name - switchToUserMode
+   Purpose - 
+   Parameters -
+   Returns - n/a
+   Side Effects - n/a
+   ----------------------------------------------------------------------- */
 
 void switchToUserMode()
 {

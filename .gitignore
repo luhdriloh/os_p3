@@ -36,7 +36,6 @@ testcases
 testResults
 usloss
 Makefile
-libuser.c
 libuser.h
 p1.c
 phase1.h
